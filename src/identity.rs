@@ -1,13 +1,15 @@
+use crate::ResourceId;
+
 use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
 use rand::prelude::*;
 use serde::{Serialize, Deserialize};
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicId(RsaPublicKey);
 
-impl fmt::Debug for PublicId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl PublicId {
+    pub fn resource_id(&self) -> ResourceId {
         struct Linear(u64);
 
         impl rand::RngCore for Linear {
@@ -19,7 +21,27 @@ impl fmt::Debug for PublicId {
 
         impl rand::CryptoRng for Linear {}
 
-        write!(f, "{:<08X}", u32::from_le_bytes(<[_; 4]>::try_from(&self.0.encrypt(&mut Linear(0), Pkcs1v15Encrypt, &[0; 4]).unwrap()[0..4]).unwrap()))
+        ResourceId(<[_; 32]>::try_from(&self.0.encrypt(&mut Linear(0), Pkcs1v15Encrypt, &[0; 32]).unwrap()[0..32]).unwrap())
+    }
+
+    pub fn human_readable_name(&self, entropy: usize) -> String {
+        let mut name = String::new();
+        for b in self.resource_id().0.into_iter().take(entropy) {
+            write!(
+                name,
+                "{}{}",
+                if name.is_empty() { "" } else { "_" },
+                include_str!("../data/words.txt").lines().nth(b as usize).unwrap().trim(),
+            ).unwrap();
+        }
+        name
+    }
+}
+
+impl fmt::Debug for PublicId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.human_readable_name(2))
+        // write!(f, "{:<032X}", self.resource_id())
     }
 }
 

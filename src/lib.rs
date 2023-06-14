@@ -1,4 +1,4 @@
-#![feature(trait_alias)]
+#![feature(trait_alias, let_chains)]
 
 mod backend;
 mod msg;
@@ -14,20 +14,48 @@ use crate::backend::{Backend, BackendFull, Sender};
 use slotmap::SlotMap;
 use tokio::select;
 use rand::prelude::*;
+use serde::{Serialize, Deserialize};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
     collections::HashMap,
 };
 
-pub type DataId = u128;
+const MAX_LEVEL_PEERS: usize = 5;
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceId([u8; 32]);
+
+impl ResourceId {
+    pub fn dist_to(&self, other: Self) -> Self {
+        let mut dist = self.0;
+        for i in 0..dist.len() {
+            dist[i] ^= other.0[i];
+        }
+        Self(dist)
+    }
+
+    // log2, effectively
+    pub fn level(&self) -> usize {
+        self.0.into_iter().enumerate()
+            .find_map(|(i, b)| if b != 0 {
+                Some(255 - i * 8 - b.ilog2() as usize)
+            } else {
+                None
+            })
+            .unwrap_or_else(|| {
+                eprintln!("Hash collision with peer?!");
+                0
+            })
+    }
+}
 
 #[derive(Debug)]
 pub enum Error<B> {
     Backend(B),
 }
 
-slotmap::new_key_type! { struct PeerId; }
+slotmap::new_key_type! { struct PeerIdx; }
 
 struct Peer<B: Backend> {
     id: PublicId,
@@ -35,8 +63,9 @@ struct Peer<B: Backend> {
 }
 
 pub struct State<B: Backend> {
-    peers: SlotMap<PeerId, Peer<B>>,
-    peers_by_id: HashMap<PublicId, PeerId>,
+    peers: SlotMap<PeerIdx, Peer<B>>,
+    peers_by_id: HashMap<PublicId, PeerIdx>,
+    peers_by_dist: [Vec<PeerIdx>; 256],
 }
 
 pub struct Node<B: Backend> {
@@ -60,6 +89,10 @@ impl<B: BackendFull> Node<B> {
             state: Mutex::new(State {
                 peers: SlotMap::default(),
                 peers_by_id: HashMap::default(),
+                peers_by_dist: {
+                    const EMPTY: Vec<PeerIdx> = Vec::new();
+                    [EMPTY; 256]
+                },
             }),
         };
         for (id, addr) in initial_peers {
@@ -73,15 +106,47 @@ impl<B: BackendFull> Node<B> {
     }
 
     pub async fn accept_peer(&self, id: PublicId, addr: B::Addr) {
-        if id != self.self_id.to_public() {
+        if id != self.self_id.to_public()
+            && !self.with_state(|state| state.peers_by_id.contains_key(&id))
+            && let Ok(_) = self.backend
+                .send(&addr, msg::Ping { phantom: Default::default() })
+                .await
+        {
+            let level = self.self_id.to_public().resource_id().dist_to(id.resource_id()).level();
             self.with_state(|state| {
                 state.peers_by_id
                     .entry(id.clone())
                     .or_insert_with(|| {
-                        eprintln!("{:?} discovered peer {:?}!", self.self_id, id);
-                        state.peers.insert(Peer { id, addr })
+                        let idx = state.peers.insert(Peer { id, addr });
+                        state.peers_by_dist[level].push(idx);
+                        idx
                     });
             });
+        }
+    }
+
+    async fn remove_peer(&self, peer_idx: PeerIdx) {
+        self.with_state(|state| {
+            if let Some(peer) = state.peers.remove(peer_idx) {
+                let level = self.self_id.to_public().resource_id().dist_to(peer.id.resource_id()).level();
+                state.peers_by_id.remove(&peer.id);
+                state.peers_by_dist[level].retain(|idx| idx != &peer_idx);
+            }
+        });
+    }
+
+    pub async fn discover_peer(&self, id: PublicId, addr: B::Addr) {
+        // Determine whether we have information about the peer already
+        if id != self.self_id.to_public()
+            && !self.with_state(|state| state.peers_by_id.contains_key(&id))
+        {
+            // Determine whether the peer is actually useful to us
+            let level = self.self_id.to_public().resource_id().dist_to(id.resource_id()).level();
+            if self.with_state(|state| state.peers_by_dist[level].len() < MAX_LEVEL_PEERS) {
+                eprintln!("{:?} discovered peer {:?}!", self.self_id, id);
+                // TODO: Technically a race condition with peer removal above, but ah well
+                self.accept_peer(id, addr).await;
+            }
         }
     }
 
@@ -101,8 +166,8 @@ impl<B: BackendFull> Node<B> {
                 .map(|peer| (peer.id.clone(), peer.addr.clone()))) }
     }
 
-    pub async fn fetch_data(&self, id: DataId) -> Result<Vec<u8>, ()> {
-        todo!("Fetch data with ID {}", id)
+    pub async fn fetch_data(&self, id: ResourceId) -> Result<Vec<u8>, ()> {
+        todo!("Fetch data with ID {:?}", id)
     }
 
     pub async fn run(self) -> Result<(), Error<B::Error>> {
@@ -132,17 +197,20 @@ impl<B: BackendFull> Node<B> {
             select! {
                 res = &mut host => break res.unwrap().map_err(Error::Backend),
                 _ = ping.tick() => {
-                    for peer in node.with_state(|state| state.peers
-                        .values()
-                        .map(|peer| peer.addr.clone())
+                    for (peer_idx, peer) in node.with_state(|state| state.peers
+                        .iter()
+                        .map(|(idx, peer)| (idx, peer.addr.clone()))
                         .collect::<Vec<_>>())
                     {
                         match node.backend
                             .send(&peer, msg::Ping { phantom: Default::default() })
                             .await
                         {
-                            Ok(_) => {},//eprintln!("`{:?}` received pong from `{:?}`!", node.self_addr, peer),
-                            Err(err) => eprintln!("Failed to sent ping to initial peer: {:?}", err),
+                            Ok(_) => {},
+                            Err(err) => {
+                                eprintln!("Failed to sent ping to peer, removing from list: {:?}", err);
+                                node.remove_peer(peer_idx).await;
+                            },
                         }
                     }
                 },
@@ -158,7 +226,7 @@ impl<B: BackendFull> Node<B> {
                         {
                             Ok(resp) => {
                                 if let Some((id, addr)) = resp.peer {
-                                    node.accept_peer(id, addr).await;
+                                    node.discover_peer(id, addr).await;
                                 }
                             },
                             Err(err) => eprintln!("Failed to sent ping to initial peer: {:?}", err),
