@@ -52,7 +52,6 @@ impl<'a> dot::GraphWalk<'a, PublicId, [PublicId; 2]> for Graph {
 async fn discovery() {
     let spawn_node = |peers: Vec<mem::Addr>| async move {
         let private_id = PrivateId::generate();
-        let public_id = private_id.to_public();
         let addr: mem::Addr = Default::default();
         let node = Node::<mem::Mem>::new(
             private_id,
@@ -66,14 +65,10 @@ async fn discovery() {
         (node, addr)
     };
 
-    let node_root = spawn_node(Vec::new()).await;
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    let mut nodes = vec![node_root];
+    let mut nodes = vec![spawn_node(Vec::new()).await];
     for _ in 0..50 {
         let (parent, parent_port) = nodes.iter().choose(&mut thread_rng()).unwrap();
         nodes.push(spawn_node(vec![parent_port.clone()]).await);
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
