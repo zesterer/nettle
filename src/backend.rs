@@ -1,4 +1,5 @@
 pub mod http;
+pub mod mem;
 
 use crate::{Node, msg::{self, Msg}};
 
@@ -6,12 +7,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt, sync::Arc, hash::Hash};
 
 #[async_trait::async_trait]
-pub trait Backend: Sized + 'static {
-    type Addr: Serialize + DeserializeOwned + Clone + Hash + Eq + fmt::Debug;
+pub trait Backend: Sized + Sync + 'static {
+    type Addr: Clone + Hash + Eq + fmt::Debug;
     type Config;
     type Error: fmt::Debug + Send + Sync;
 
-    async fn start(config: Self::Config) -> Result<Self, Self::Error>;
+    async fn create(config: Self::Config) -> Result<Self, Self::Error>;
+    async fn init(&self, node: &Arc<Node<Self>>) {}
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error>;
 }
 

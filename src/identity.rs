@@ -5,7 +5,7 @@ use rand::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::fmt::{self, Write as _};
 
-#[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicId(RsaPublicKey);
 
 impl PublicId {

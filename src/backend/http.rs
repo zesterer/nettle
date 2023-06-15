@@ -6,6 +6,7 @@ use axum::{
     Json, Server,
 };
 use reqwest::Url;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -29,7 +30,7 @@ impl Backend for Http {
     type Config = Config;
     type Error = Error;
 
-    async fn start(config: Self::Config) -> Result<Self, Self::Error> {
+    async fn create(config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self {
             config,
             client: reqwest::Client::new(),
@@ -37,27 +38,6 @@ impl Backend for Http {
     }
 
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error> {
-        async fn recv_peer_greet(
-            node: State<Arc<Node<Http>>>,
-            Json(greet): Json<msg::Greet<Http>>,
-        ) -> Json<msg::GreetResp<Http>> {
-            Json(node.recv_greet(greet).await)
-        }
-
-        async fn recv_peer_ping(
-            node: State<Arc<Node<Http>>>,
-            Json(ping): Json<msg::Ping<Http>>,
-        ) -> Json<msg::Pong<Http>> {
-            Json(node.recv_ping(ping).await)
-        }
-
-        async fn recv_peer_discover(
-            node: State<Arc<Node<Http>>>,
-            Json(ping): Json<msg::Discover<Http>>,
-        ) -> Json<msg::DiscoverResp<Http>> {
-            Json(node.recv_discover(ping).await)
-        }
-
         let peer_router = Router::new()
             .route("/greet", get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
                 Json(node.recv_greet(msg).await)
@@ -68,13 +48,6 @@ impl Backend for Http {
             .route("/discover", get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
                 Json(node.recv_discover(msg).await)
             }));
-
-        async fn recv_data(
-            node: State<Arc<Node<Http>>>,
-            Path(hash): Path<String>,
-        ) -> Result<Vec<u8>, ()> {
-            todo!()
-        }
 
         let data_router = Router::new()
             .route("/:hash", get(|node: State<Arc<Node<_>>>, Path(id)| async move {
@@ -115,12 +88,12 @@ impl Sender<msg::Discover<Self>> for Http {
 }
 
 impl Http {
-    async fn send_inner<M: Msg<Http>>(
+    async fn send_inner<M: Msg<Http> + Serialize>(
         &self,
         path: &str,
         addr: &str,
         msg: M,
-    ) -> Result<M::Resp, Error> {
+    ) -> Result<M::Resp, Error> where M::Resp: DeserializeOwned {
         let url = addr
             .parse::<Url>()
             .unwrap()
