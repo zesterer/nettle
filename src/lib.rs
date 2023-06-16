@@ -4,17 +4,17 @@
 mod backend;
 mod identity;
 mod msg;
+mod tag;
 
 pub use crate::{
     backend::{http, mem},
     identity::{PrivateId, PublicId},
+    tag::Tag,
 };
 
 use crate::backend::{Backend, BackendFull, Sender};
 
 use rand::prelude::*;
-use rsa::{traits::PublicKeyParts, RsaPublicKey};
-use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::{
     collections::HashMap,
@@ -23,67 +23,7 @@ use std::{
 };
 use tokio::select;
 
-const MAX_LEVEL_PEERS: usize = 1;
-
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Tag([u8; 32]);
-
-impl std::ops::Deref for Tag {
-    type Target = [u8; 32];
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Tag {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    pub fn digest_many<B: AsRef<[u8]>, I: IntoIterator<Item = B>>(bytes: I) -> Self {
-        use sha3::{Digest, Sha3_256};
-        let mut hasher = Sha3_256::new();
-        for bytes in bytes {
-            hasher.update(bytes);
-        }
-        Self(hasher.finalize().into())
-    }
-
-    pub fn fingerprint(key: &RsaPublicKey) -> Self {
-        Self::digest_many([key.n(), key.e()].map(|x| x.to_bytes_le()))
-    }
-
-    pub fn digest<B: AsRef<[u8]>>(bytes: B) -> Self {
-        Self::digest_many([bytes])
-    }
-
-    pub fn generate() -> Self {
-        Self(thread_rng().gen())
-    }
-
-    pub fn dist_to(&self, other: Self) -> Self {
-        let mut dist = self.0;
-        for i in 0..dist.len() {
-            dist[i] ^= other.0[i];
-        }
-        Self(dist)
-    }
-
-    // log2, effectively
-    pub fn level(&self) -> u16 {
-        self.0
-            .into_iter()
-            .enumerate()
-            .find_map(|(i, b)| {
-                if b != 0 {
-                    Some(255 - i as u16 * 8 - b.ilog2() as u16)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    }
-}
+const MAX_LEVEL_PEERS: usize = 2;
 
 #[derive(Debug)]
 pub enum Error<B> {
@@ -101,6 +41,7 @@ pub struct State<B: Backend> {
     peers: SlotMap<PeerIdx, Peer<B>>,
     peers_by_id: HashMap<PublicId, PeerIdx>,
     peers_by_level: [Vec<PeerIdx>; 256],
+    data: HashMap<Tag, Arc<[u8]>>,
 }
 
 pub struct Node<B: Backend> {
@@ -130,6 +71,7 @@ impl<B: BackendFull> Node<B> {
                     const EMPTY: Vec<PeerIdx> = Vec::new();
                     [EMPTY; 256]
                 },
+                data: HashMap::default(),
             }),
         };
         let this = Arc::new(this);
@@ -153,7 +95,7 @@ impl<B: BackendFull> Node<B> {
         f(&mut self.state.lock().unwrap())
     }
 
-    pub async fn accept_peer(&self, id: PublicId, addr: B::Addr) {
+    pub async fn accept_peer(&self, id: PublicId, addr: B::Addr) -> bool {
         if id != self.self_id.pub_id
             && !self.with_state(|state| state.peers_by_id.contains_key(&id))
             && let Ok(_) = self.backend
@@ -170,6 +112,9 @@ impl<B: BackendFull> Node<B> {
                         idx
                     });
             });
+            true
+        } else {
+            false
         }
     }
 
@@ -237,9 +182,12 @@ impl<B: BackendFull> Node<B> {
 
     pub async fn recv_greet(&self, greet: msg::Greet<B>) -> msg::GreetResp<B> {
         // If we're willing to
-        if self.can_accept_peer(&greet.sender.0) {
+        if self.can_accept_peer(&greet.sender.0)
+            && self
+                .accept_peer(greet.sender.0.clone(), greet.sender.1)
+                .await
+        {
             eprintln!("{:?} accepted peer {:?}!", self.self_id, greet.sender.0);
-            self.accept_peer(greet.sender.0, greet.sender.1).await;
             msg::GreetResp {
                 result: Ok(self.id().clone()),
                 phantom: Default::default(),
@@ -274,14 +222,14 @@ impl<B: BackendFull> Node<B> {
                     .peers
                     .values()
                     // Don't tell the peer about itself
-                    .filter(|peer| peer.id != discover.target)
+                    .filter(|peer| peer.id.tag != discover.target)
                     // Only consider peers that are closer than the target
                     .filter(|peer| {
-                        peer.id.tag.dist_to(discover.target.tag).level() <= discover.max_level
+                        peer.id.tag.dist_to(discover.target).level() <= discover.max_level
                     })
-                    // .choose(&mut thread_rng())
+                    .choose(&mut thread_rng())
                     // // Try to find that which has the greatest distance within the maximum distance
-                    .min_by_key(|peer| peer.id.tag.dist_to(discover.target.tag).0)
+                    // .min_by_key(|peer| peer.id.tag.dist_to(discover.target.tag))
                     // // Only pass that peer on about a third of the time
                     // .filter(|_| thread_rng().gen_bool(0.3))
                     .map(|peer| (peer.id.clone(), peer.addr.clone()))
@@ -289,8 +237,129 @@ impl<B: BackendFull> Node<B> {
         }
     }
 
-    pub async fn fetch_data(&self, id: Tag) -> Result<Vec<u8>, ()> {
-        todo!("Fetch data with ID {:?}", id)
+    pub async fn load_data(&self, tag: Tag) -> Option<Box<[u8]>> {
+        Some(
+            self.with_state(|state| state.data.get(&tag).cloned())?
+                .to_vec()
+                .into_boxed_slice(),
+        )
+    }
+
+    pub async fn save_data(&self, tag: Tag, data: Box<[u8]>) {
+        let data = data.to_vec().into();
+        self.with_state(|state| {
+            state.data.entry(tag).or_insert(data);
+        })
+    }
+
+    pub async fn recv_upload(&self, upload: msg::Upload<B>) -> msg::UploadResp<B> {
+        let tag = Tag::digest(&*upload.data);
+        msg::UploadResp {
+            // Try to find a peer that's closer to upload to
+            result: if let Some(closer) = self.with_state(|state| {
+                state
+                    .peers
+                    .values()
+                    .filter(|peer| peer.id.tag.dist_to(tag) < self.id().tag.dist_to(tag))
+                    .min_by_key(|peer| peer.id.tag.dist_to(tag))
+                    .map(|peer| peer.addr.clone())
+            }) {
+                match self.backend.send(&closer, upload).await {
+                    Ok(resp) => resp.result,
+                    Err(err) => {
+                        eprintln!(
+                            "{:?} failed to sent locate to peer {:?}: {:?}",
+                            self.id(),
+                            closer,
+                            err
+                        );
+                        Err(())
+                    }
+                }
+            } else {
+                self.save_data(tag, upload.data).await;
+                Ok(tag)
+            },
+            phantom: Default::default(),
+        }
+    }
+
+    pub async fn recv_locate(&self, locate: msg::Locate<B>) -> msg::LocateResp<B> {
+        msg::LocateResp {
+            result: match self.load_data(locate.tag).await {
+                // If we have the data, return it
+                Some(data) => Ok(Some(data)),
+                // If we don't have the data, attempt to find someone closer to it
+                None => {
+                    let self_dist = self.id().tag.dist_to(locate.tag);
+                    self.with_state(|state| {
+                        state
+                            .peers
+                            .values()
+                            .filter(|peer| peer.id.tag.dist_to(locate.tag) < self_dist)
+                            .min_by_key(|peer| peer.id.tag.dist_to(locate.tag))
+                            .map(|peer| (peer.id.clone(), peer.addr.clone()))
+                    })
+                    .map(Err)
+                    .unwrap_or(Ok(None))
+                }
+            },
+        }
+    }
+
+    pub async fn fetch_data(&self, tag: Tag) -> Result<Option<Box<[u8]>>, ()> {
+        // Find the peer with the closest tag
+        if let Some(data) = self.load_data(tag).await {
+            Ok(Some(data))
+        } else if let Some(mut closest) = self.with_state(|state| {
+            state
+                .peers
+                .values()
+                .min_by_key(|peer| peer.id.tag.dist_to(tag))
+                .map(|peer| (peer.id.clone(), peer.addr.clone()))
+        }) {
+            loop {
+                match self
+                    .backend
+                    .send(
+                        &closest.1,
+                        msg::Locate {
+                            tag,
+                            phantom: Default::default(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(resp) => match resp.result {
+                        Ok(Some(data)) => break Ok(Some(data)),
+                        // TODO: Maybe we should do backtracking here or something?
+                        Ok(None) => break Ok(None),
+                        Err(next_closest) => {
+                            if next_closest.0.tag.dist_to(tag) < closest.0.tag.dist_to(tag) {
+                                // Not found yet, but we have another link to follow
+                                closest = next_closest;
+                            } else {
+                                // We found a liar! Peer returned a node that was further. Assume this means that it can't
+                                // locate it.
+                                eprintln!("{:?} lied to peer {:?} and returned a node that was *further* from the target!", closest.0, self.id());
+                                break Ok(None);
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        eprintln!(
+                            "{:?} failed to sent locate to peer {:?}: {:?}",
+                            self.id(),
+                            closest.0,
+                            err
+                        );
+                        break Err(());
+                    }
+                }
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn run(self: Arc<Self>) -> Result<(), Error<B::Error>> {
@@ -309,6 +378,7 @@ impl<B: BackendFull> Node<B> {
                             self.id(),
                             peer_addr
                         );
+                        break;
                     }
                     Err(Some(alt_addr)) => {
                         eprintln!("{:?} attempted to connect to initial peer, but was rejected. Peer suggested {:?} instead.", self.id(), alt_addr);
@@ -318,8 +388,8 @@ impl<B: BackendFull> Node<B> {
             }
         }
 
-        let mut ping = tokio::time::interval(Duration::from_secs(3));
-        let mut discover = tokio::time::interval(Duration::from_secs(1));
+        let mut ping = tokio::time::interval(Duration::from_secs(10));
+        let mut discover = tokio::time::interval(Duration::from_secs(5));
 
         loop {
             select! {
@@ -335,8 +405,8 @@ impl<B: BackendFull> Node<B> {
                             .await
                         {
                             Ok(_) => {},
-                            Err(err) => {
-                                eprintln!("Failed to sent ping to peer, removing from list: {:?}", err);
+                            Err(_) => {
+                                eprintln!("Failed to sent ping to peer, removing from list.");
                                 self.remove_peer(peer_idx).await;
                             },
                         }
@@ -351,7 +421,7 @@ impl<B: BackendFull> Node<B> {
                         for current_level in (0..256).rev() {
                             match self.backend
                                 .send(&current_peer.1, msg::Discover {
-                                    target: self.id().clone(),
+                                    target: self.id().tag,
                                     max_level: current_level,
                                     phantom: Default::default(),
                                 })
@@ -367,41 +437,6 @@ impl<B: BackendFull> Node<B> {
                             }
                         }
                     }
-
-
-                    /*
-                    if let Some((peer_id, peer_addr)) = self.with_state(|state| state.peers
-                        .values()
-                        .choose(&mut thread_rng())
-                        .map(|peer| (peer.id.clone(), peer.addr.clone())))
-                    {
-                        // Don't ask a peer for an unreasonable target distance that it's exceedingly unlikely to attain
-                        let max_ask_level = peer_id.tag.dist_to(self.id().tag).level().saturating_sub(2);
-                        match self.backend
-                            .send(&peer_addr, msg::Discover {
-                                target: self.id(),
-                                max_level: self.with_state(|state| state
-                                    .peers_by_level
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(level, _)| *level as u16 >= max_ask_level)
-                                    .map(|(level, peers)| (level as u16, peers.len()))
-                                    .collect::<Vec<_>>()
-                                    .choose_weighted(&mut thread_rng(), |(level, len)| (*level as f32).powf(2.0) / (1.0 + *len as f32))
-                                    .unwrap().0),
-                                phantom: Default::default(),
-                            })
-                            .await
-                        {
-                            Ok(resp) => {
-                                if let Some((id, addr)) = resp.peer {
-                                    let _ = self.discover_peer(Some(&id), addr).await;
-                                }
-                            },
-                            Err(err) => eprintln!("Failed to sent discover to peer: {:?}", err),
-                        }
-                    }
-                    */
                 },
             }
         }

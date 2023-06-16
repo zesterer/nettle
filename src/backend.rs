@@ -19,8 +19,12 @@ pub trait Backend: Sized + Sync + 'static {
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error>;
 }
 
-pub trait BackendFull =
-    Backend + Sender<msg::Greet<Self>> + Sender<msg::Ping<Self>> + Sender<msg::Discover<Self>>;
+pub trait BackendFull = Backend
+    + Sender<msg::Greet<Self>>
+    + Sender<msg::Ping<Self>>
+    + Sender<msg::Discover<Self>>
+    + Sender<msg::Locate<Self>>
+    + Sender<msg::Upload<Self>>;
 
 #[async_trait::async_trait]
 pub trait Sender<M: Msg<Self>>: Backend {

@@ -17,6 +17,8 @@ rsa = { version = "0.9", features = ["serde"] }
 futures = "0.3"
 sha3 = "0.10"
 rand_chacha = "0.3"
+hex = "0.4"
+clap = { version = "4.3", features = ["derive"] }
 
 [dev-dependencies]
 dot = "0.1"

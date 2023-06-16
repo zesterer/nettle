@@ -1,9 +1,10 @@
 use crate::{
     msg::{self, Msg},
-    Backend, Node, Sender,
+    Backend, Node, Sender, Tag,
 };
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     routing::{get, Router},
     Json, Server,
@@ -59,19 +60,55 @@ impl Backend for Http {
                 get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
                     Json(node.recv_discover(msg).await)
                 }),
+            )
+            .route(
+                "/locate",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_locate(msg).await)
+                }),
+            )
+            .route(
+                "/upload",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_locate(msg).await)
+                }),
             );
 
-        let data_router = Router::new().route(
-            "/:hash",
-            get(|node: State<Arc<Node<_>>>, Path(id)| async move {
-                node.fetch_data(id).await.map(Json)
-            }),
-        );
+        let data_router = Router::new()
+            .route(
+                "/:hash",
+                get(|node: State<Arc<Node<_>>>, Path(id)| async move {
+                    match Tag::try_from_hex::<String>(id) {
+                        Ok(tag) => match node.fetch_data(tag).await {
+                            Ok(Some(data)) => Ok(Bytes::from(data)),
+                            Ok(None) => Err("data does not exist"),
+                            Err(()) => Err("unknown error"),
+                        },
+                        Err(err) => Err(err),
+                    }
+                }),
+            )
+            .route(
+                "/upload",
+                get(|node: State<Arc<Node<_>>>, bytes: Bytes| async move {
+                    Json(
+                        node.recv_upload(msg::Upload {
+                            data: bytes.to_vec().into_boxed_slice(),
+                            phantom: Default::default(),
+                        })
+                        .await
+                        .result
+                        .ok(),
+                    )
+                }),
+            );
 
         let router = Router::new()
             .nest("/peer", peer_router)
             .nest("/data", data_router)
             .with_state(node.clone());
+
+        eprintln!("Starting HTTP server on {}", node.backend.config.bind_addr);
 
         Server::bind(&node.backend.config.bind_addr)
             .serve(router.into_make_service())
@@ -113,6 +150,28 @@ impl Sender<msg::Discover<Self>> for Http {
     }
 }
 
+#[async_trait::async_trait]
+impl Sender<msg::Locate<Self>> for Http {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Locate<Self>,
+    ) -> Result<msg::LocateResp<Self>, Self::Error> {
+        self.send_inner("/peer/locate", addr, msg).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Sender<msg::Upload<Self>> for Http {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Upload<Self>,
+    ) -> Result<msg::UploadResp<Self>, Self::Error> {
+        self.send_inner("/peer/upload", addr, msg).await
+    }
+}
+
 impl Http {
     async fn send_inner<M: Msg<Http> + Serialize>(
         &self,
@@ -126,6 +185,7 @@ impl Http {
         let url = addr.parse::<Url>().unwrap().join(path).unwrap();
         self.client
             .get(url)
+            .timeout(std::time::Duration::from_secs(1))
             .json(&msg)
             .send()
             .await

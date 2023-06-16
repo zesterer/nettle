@@ -78,3 +78,25 @@ impl Sender<msg::Discover<Self>> for Mem {
         Ok(addr.0.get().unwrap().recv_discover(msg).await)
     }
 }
+
+#[async_trait::async_trait]
+impl Sender<msg::Locate<Self>> for Mem {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Locate<Self>,
+    ) -> Result<msg::LocateResp<Self>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_locate(msg).await)
+    }
+}
+
+#[async_trait::async_trait]
+impl Sender<msg::Upload<Self>> for Mem {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Upload<Self>,
+    ) -> Result<msg::UploadResp<Self>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_upload(msg).await)
+    }
+}

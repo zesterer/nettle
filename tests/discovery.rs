@@ -1,8 +1,9 @@
-use nettle::{mem, Node, PrivateId, PublicId};
+use nettle::{mem, Node, PrivateId, PublicId, Tag};
 use rand::prelude::*;
 use std::{borrow::Cow, collections::HashSet, fs::File, sync::Arc};
 
 struct Graph {
+    close_to: Tag,
     nodes: Vec<Arc<Node<mem::Mem>>>,
 }
 
@@ -16,7 +17,11 @@ impl<'a> dot::Labeller<'a, PublicId, [PublicId; 2]> for Graph {
     }
 
     fn node_label<'b>(&'b self, n: &PublicId) -> dot::LabelText<'b> {
-        dot::LabelText::label(n.human_readable_name(2))
+        dot::LabelText::label(format!(
+            "{}{}",
+            n.human_readable_name(2),
+            255 - self.close_to.dist_to(n.tag).level() as usize
+        ))
     }
 
     fn edge_label<'b>(&'b self, [a, b]: &[PublicId; 2]) -> dot::LabelText<'b> {
@@ -58,7 +63,7 @@ impl<'a> dot::GraphWalk<'a, PublicId, [PublicId; 2]> for Graph {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn discovery() {
     let spawn_node = |peers: Vec<mem::Addr>| async move {
         let private_id = PrivateId::generate();
@@ -80,6 +85,7 @@ async fn discovery() {
 
     dot::render(
         &Graph {
+            close_to: nodes.iter().choose(&mut thread_rng()).unwrap().0.id().tag,
             nodes: nodes.into_iter().map(|n| n.0).collect(),
         },
         &mut File::create("graph.dot").unwrap(),
