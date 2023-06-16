@@ -245,6 +245,10 @@ impl<B: BackendFull> Node<B> {
         )
     }
 
+    pub async fn has_data(&self, tag: Tag) -> bool {
+        self.with_state(|state| state.data.contains_key(&tag))
+    }
+
     pub async fn save_data(&self, tag: Tag, data: Box<[u8]>) {
         let data = data.to_vec().into();
         self.with_state(|state| {
@@ -284,34 +288,11 @@ impl<B: BackendFull> Node<B> {
         }
     }
 
-    pub async fn recv_locate(&self, locate: msg::Locate<B>) -> msg::LocateResp<B> {
-        msg::LocateResp {
-            result: match self.load_data(locate.tag).await {
-                // If we have the data, return it
-                Some(data) => Ok(Some(data)),
-                // If we don't have the data, attempt to find someone closer to it
-                None => {
-                    let self_dist = self.id().tag.dist_to(locate.tag);
-                    self.with_state(|state| {
-                        state
-                            .peers
-                            .values()
-                            .filter(|peer| peer.id.tag.dist_to(locate.tag) < self_dist)
-                            .min_by_key(|peer| peer.id.tag.dist_to(locate.tag))
-                            .map(|peer| (peer.id.clone(), peer.addr.clone()))
-                    })
-                    .map(Err)
-                    .unwrap_or(Ok(None))
-                }
-            },
-        }
-    }
-
-    pub async fn fetch_data(&self, tag: Tag) -> Result<Option<Box<[u8]>>, ()> {
-        // Find the peer with the closest tag
-        if let Some(data) = self.load_data(tag).await {
-            Ok(Some(data))
+    pub async fn locate_data(&self, tag: Tag) -> Result<(bool, (PublicId, B::Addr)), ()> {
+        if self.has_data(tag).await {
+            Ok((true, (self.id().clone(), self.self_addr.clone())))
         } else if let Some(mut closest) = self.with_state(|state| {
+            // Find the peer with the closest tag
             state
                 .peers
                 .values()
@@ -331,9 +312,7 @@ impl<B: BackendFull> Node<B> {
                     .await
                 {
                     Ok(resp) => match resp.result {
-                        Ok(Some(data)) => break Ok(Some(data)),
-                        // TODO: Maybe we should do backtracking here or something?
-                        Ok(None) => break Ok(None),
+                        Ok(has_data) => break Ok((has_data, closest)),
                         Err(next_closest) => {
                             if next_closest.0.tag.dist_to(tag) < closest.0.tag.dist_to(tag) {
                                 // Not found yet, but we have another link to follow
@@ -342,13 +321,13 @@ impl<B: BackendFull> Node<B> {
                                 // We found a liar! Peer returned a node that was further. Assume this means that it can't
                                 // locate it.
                                 eprintln!("{:?} lied to peer {:?} and returned a node that was *further* from the target!", closest.0, self.id());
-                                break Ok(None);
+                                break Ok((false, (self.id().clone(), self.self_addr.clone())));
                             }
                         }
                     },
                     Err(err) => {
                         eprintln!(
-                            "{:?} failed to sent locate to peer {:?}: {:?}",
+                            "{:?} failed to send locate to peer {:?}: {:?}",
                             self.id(),
                             closest.0,
                             err
@@ -358,7 +337,65 @@ impl<B: BackendFull> Node<B> {
                 }
             }
         } else {
-            Ok(None)
+            Ok((false, (self.id().clone(), self.self_addr.clone())))
+        }
+    }
+
+    pub async fn recv_locate(&self, locate: msg::Locate<B>) -> msg::LocateResp<B> {
+        msg::LocateResp {
+            result: match self.has_data(locate.tag).await {
+                // If we have the data, return it
+                true => Ok(true),
+                // If we don't have the data, attempt to find someone closer to it
+                false => {
+                    let self_dist = self.id().tag.dist_to(locate.tag);
+                    self.with_state(|state| {
+                        state
+                            .peers
+                            .values()
+                            .filter(|peer| peer.id.tag.dist_to(locate.tag) < self_dist)
+                            .min_by_key(|peer| peer.id.tag.dist_to(locate.tag))
+                            .map(|peer| (peer.id.clone(), peer.addr.clone()))
+                    })
+                    .map(Err)
+                    .unwrap_or(Ok(false))
+                }
+            },
+        }
+    }
+
+    pub async fn recv_download(&self, download: msg::Download<B>) -> msg::DownloadResp<B> {
+        msg::DownloadResp {
+            data: self.load_data(download.tag).await,
+            phantom: Default::default(),
+        }
+    }
+
+    pub async fn fetch_data(&self, tag: Tag) -> Result<Option<Box<[u8]>>, ()> {
+        match self.locate_data(tag).await? {
+            (true, closest) => match self
+                .backend
+                .send(
+                    &closest.1,
+                    msg::Download {
+                        tag,
+                        phantom: Default::default(),
+                    },
+                )
+                .await
+            {
+                Ok(resp) => Ok(resp.data), // TODO: What if it's None? That's wrong...
+                Err(err) => {
+                    eprintln!(
+                        "{:?} failed to send download to peer {:?}: {:?}",
+                        self.id(),
+                        closest.0,
+                        err
+                    );
+                    Err(())
+                }
+            },
+            (false, _) => Ok(None),
         }
     }
 

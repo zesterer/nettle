@@ -70,7 +70,13 @@ impl Backend for Http {
             .route(
                 "/upload",
                 get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_locate(msg).await)
+                    Json(node.recv_upload(msg).await)
+                }),
+            )
+            .route(
+                "/download",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_download(msg).await)
                 }),
             );
 
@@ -169,6 +175,17 @@ impl Sender<msg::Upload<Self>> for Http {
         msg: msg::Upload<Self>,
     ) -> Result<msg::UploadResp<Self>, Self::Error> {
         self.send_inner("/peer/upload", addr, msg).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Sender<msg::Download<Self>> for Http {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Download<Self>,
+    ) -> Result<msg::DownloadResp<Self>, Self::Error> {
+        self.send_inner("/peer/download", addr, msg).await
     }
 }
 

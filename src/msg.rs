@@ -106,10 +106,10 @@ pub struct Locate<B: Backend> {
     deserialize = "B::Addr: DeserializeOwned"
 ))]
 pub struct LocateResp<B: Backend> {
-    // Ok(Some(_)) => I own the resource and here it is
-    // Ok(None) => I do not own the resource and do not know anybody closer to the resource (404!)
+    // Ok(true) => I own the resource
+    // Ok(false) => I do not own the resource and do not know anybody closer to the resource (404!)
     // Err(_) => I do not own the resource but this other node is closer to it
-    pub result: Result<Option<Box<[u8]>>, (PublicId, B::Addr)>,
+    pub result: Result<bool, (PublicId, B::Addr)>,
 }
 
 impl<B: Backend> Msg<B> for Locate<B> {
@@ -141,4 +141,33 @@ pub struct UploadResp<B: Backend> {
 
 impl<B: Backend> Msg<B> for Upload<B> {
     type Resp = UploadResp<B>;
+}
+
+/// Upload some data to the network.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "B::Addr: Serialize",
+    deserialize = "B::Addr: DeserializeOwned"
+))]
+pub struct Download<B: Backend> {
+    pub tag: Tag,
+    #[serde(skip)]
+    pub phantom: PhantomData<B>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "B::Addr: Serialize",
+    deserialize = "B::Addr: DeserializeOwned"
+))]
+pub struct DownloadResp<B: Backend> {
+    // Some(_) => I own the resource and here it is
+    // None => I do not own the resource
+    pub data: Option<Box<[u8]>>,
+    #[serde(skip)]
+    pub phantom: PhantomData<B>,
+}
+
+impl<B: Backend> Msg<B> for Download<B> {
+    type Resp = DownloadResp<B>;
 }

@@ -24,7 +24,8 @@ pub trait BackendFull = Backend
     + Sender<msg::Ping<Self>>
     + Sender<msg::Discover<Self>>
     + Sender<msg::Locate<Self>>
-    + Sender<msg::Upload<Self>>;
+    + Sender<msg::Upload<Self>>
+    + Sender<msg::Download<Self>>;
 
 #[async_trait::async_trait]
 pub trait Sender<M: Msg<Self>>: Backend {

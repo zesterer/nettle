@@ -100,3 +100,14 @@ impl Sender<msg::Upload<Self>> for Mem {
         Ok(addr.0.get().unwrap().recv_upload(msg).await)
     }
 }
+
+#[async_trait::async_trait]
+impl Sender<msg::Download<Self>> for Mem {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Download<Self>,
+    ) -> Result<msg::DownloadResp<Self>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_download(msg).await)
+    }
+}
