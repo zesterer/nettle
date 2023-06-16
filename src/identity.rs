@@ -1,40 +1,51 @@
-use crate::ResourceId;
+use crate::Tag;
 
-use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
 use rand::prelude::*;
-use serde::{Serialize, Deserialize};
+use rand_chacha::ChaCha20Rng;
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Write as _};
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PublicId(RsaPublicKey);
+#[serde(from = "RsaPublicKey")]
+#[serde(into = "RsaPublicKey")]
+pub struct PublicId {
+    pub tag: Tag,
+    pub key: RsaPublicKey,
+}
 
 impl PublicId {
-    pub fn resource_id(&self) -> ResourceId {
-        struct Linear(u64);
-
-        impl rand::RngCore for Linear {
-            fn next_u32(&mut self) -> u32 { self.0 += 1; self.0 as u32 }
-            fn next_u64(&mut self) -> u64 { self.0 += 1; self.0 }
-            fn fill_bytes(&mut self, dest: &mut [u8]) { dest.fill_with(|| self.next_u64() as u8); }
-            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> { Ok(self.fill_bytes(dest)) }
-        }
-
-        impl rand::CryptoRng for Linear {}
-
-        ResourceId(<[_; 32]>::try_from(&self.0.encrypt(&mut Linear(0), Pkcs1v15Encrypt, &[0; 32]).unwrap()[0..32]).unwrap())
-    }
-
     pub fn human_readable_name(&self, entropy: usize) -> String {
         let mut name = String::new();
-        for b in self.resource_id().0.into_iter().take(entropy) {
+        for b in self.tag.into_iter().take(entropy) {
             write!(
                 name,
                 "{}{}",
                 if name.is_empty() { "" } else { "_" },
-                include_str!("../data/words.txt").lines().nth(b as usize).unwrap().trim(),
-            ).unwrap();
+                include_str!("../data/words.txt")
+                    .lines()
+                    .nth(b as usize)
+                    .unwrap()
+                    .trim(),
+            )
+            .unwrap();
         }
         name
+    }
+}
+
+impl From<RsaPublicKey> for PublicId {
+    fn from(key: RsaPublicKey) -> Self {
+        Self {
+            tag: Tag::fingerprint(&key),
+            key,
+        }
+    }
+}
+
+impl Into<RsaPublicKey> for PublicId {
+    fn into(self) -> RsaPublicKey {
+        self.key
     }
 }
 
@@ -45,20 +56,35 @@ impl fmt::Debug for PublicId {
     }
 }
 
-pub struct PrivateId(RsaPrivateKey);
+pub struct PrivateId {
+    pub pub_id: PublicId,
+    #[allow(dead_code)]
+    priv_tag: Tag,
+    #[allow(dead_code)]
+    priv_key: RsaPrivateKey,
+}
 
 impl PrivateId {
-    pub fn generate() -> Self {
-        Self(RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap())
+    pub fn from_seed<B: AsRef<[u8]>>(bytes: B) -> Self {
+        // The private tag should not be revealed, since it acts as the seed for deriving the key pair
+        let priv_tag = Tag::digest(bytes);
+        // Generate the key pair from the private tag in a deterministic manner
+        let priv_key = RsaPrivateKey::new(&mut ChaCha20Rng::from_seed(*priv_tag), 2048).unwrap();
+
+        Self {
+            pub_id: PublicId::from(priv_key.to_public_key()),
+            priv_tag,
+            priv_key,
+        }
     }
 
-    pub fn to_public(&self) -> PublicId {
-        PublicId(self.0.to_public_key())
+    pub fn generate() -> Self {
+        Self::from_seed(&thread_rng().gen::<[u8; 32]>())
     }
 }
 
 impl fmt::Debug for PrivateId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.to_public().fmt(f)
+        self.pub_id.fmt(f)
     }
 }

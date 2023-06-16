@@ -1,10 +1,12 @@
 pub mod http;
 pub mod mem;
 
-use crate::{Node, msg::{self, Msg}};
+use crate::{
+    msg::{self, Msg},
+    Node,
+};
 
-use serde::{Serialize, de::DeserializeOwned};
-use std::{fmt, sync::Arc, hash::Hash};
+use std::{fmt, hash::Hash, sync::Arc};
 
 #[async_trait::async_trait]
 pub trait Backend: Sized + Sync + 'static {
@@ -13,14 +15,12 @@ pub trait Backend: Sized + Sync + 'static {
     type Error: fmt::Debug + Send + Sync;
 
     async fn create(config: Self::Config) -> Result<Self, Self::Error>;
-    async fn init(&self, node: &Arc<Node<Self>>) {}
+    async fn init(&self, _node: &Arc<Node<Self>>) {}
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error>;
 }
 
-pub trait BackendFull = Backend
-    + Sender<msg::Greet<Self>>
-    + Sender<msg::Ping<Self>>
-    + Sender<msg::Discover<Self>>;
+pub trait BackendFull =
+    Backend + Sender<msg::Greet<Self>> + Sender<msg::Ping<Self>> + Sender<msg::Discover<Self>>;
 
 #[async_trait::async_trait]
 pub trait Sender<M: Msg<Self>>: Backend {

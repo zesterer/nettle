@@ -1,5 +1,5 @@
-use crate::{Node, Backend, Sender, msg::{self, Msg}};
-use std::{sync::Arc, sync::OnceLock, fmt, cmp, hash};
+use crate::{msg, Backend, Node, Sender};
+use std::{cmp, fmt, hash, sync::Arc, sync::OnceLock};
 
 #[derive(Clone, Default)]
 pub struct Addr(pub Arc<OnceLock<Arc<Node<Mem>>>>);
@@ -10,7 +10,9 @@ impl hash::Hash for Addr {
     }
 }
 impl cmp::PartialEq for Addr {
-    fn eq(&self, other: &Self) -> bool { Arc::as_ptr(&self.0) as *const () == Arc::as_ptr(&other.0) as *const () }
+    fn eq(&self, other: &Self) -> bool {
+        Arc::as_ptr(&self.0) as *const () == Arc::as_ptr(&other.0) as *const ()
+    }
 }
 impl cmp::Eq for Addr {}
 
@@ -31,16 +33,14 @@ impl Backend for Mem {
     type Error = std::convert::Infallible;
 
     async fn create(addr: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self {
-            addr,
-        })
+        Ok(Self { addr })
     }
 
     async fn init(&self, node: &Arc<Node<Self>>) {
         node.backend.addr.0.set(node.clone()).ok().unwrap();
     }
 
-    async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error> {
+    async fn host(_: Arc<Node<Self>>) -> Result<(), Self::Error> {
         let () = futures::future::pending().await;
         Ok(())
     }
@@ -48,21 +48,33 @@ impl Backend for Mem {
 
 #[async_trait::async_trait]
 impl Sender<msg::Greet<Self>> for Mem {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Greet<Self>) -> Result<msg::GreetResp<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Greet<Self>,
+    ) -> Result<msg::GreetResp<Self>, Self::Error> {
         Ok(addr.0.get().unwrap().recv_greet(msg).await)
     }
 }
 
 #[async_trait::async_trait]
 impl Sender<msg::Ping<Self>> for Mem {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Ping<Self>) -> Result<msg::Pong<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Ping<Self>,
+    ) -> Result<msg::Pong<Self>, Self::Error> {
         Ok(addr.0.get().unwrap().recv_ping(msg).await)
     }
 }
 
 #[async_trait::async_trait]
 impl Sender<msg::Discover<Self>> for Mem {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Discover<Self>) -> Result<msg::DiscoverResp<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Discover<Self>,
+    ) -> Result<msg::DiscoverResp<Self>, Self::Error> {
         Ok(addr.0.get().unwrap().recv_discover(msg).await)
     }
 }

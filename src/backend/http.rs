@@ -1,4 +1,7 @@
-use crate::{Node, Backend, Sender, msg::{self, Msg}};
+use crate::{
+    msg::{self, Msg},
+    Backend, Node, Sender,
+};
 
 use axum::{
     extract::{Path, State},
@@ -6,7 +9,7 @@ use axum::{
     Json, Server,
 };
 use reqwest::Url;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
@@ -39,20 +42,31 @@ impl Backend for Http {
 
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error> {
         let peer_router = Router::new()
-            .route("/greet", get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                Json(node.recv_greet(msg).await)
-            }))
-            .route("/ping", get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                Json(node.recv_ping(msg).await)
-            }))
-            .route("/discover", get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                Json(node.recv_discover(msg).await)
-            }));
+            .route(
+                "/greet",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_greet(msg).await)
+                }),
+            )
+            .route(
+                "/ping",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_ping(msg).await)
+                }),
+            )
+            .route(
+                "/discover",
+                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
+                    Json(node.recv_discover(msg).await)
+                }),
+            );
 
-        let data_router = Router::new()
-            .route("/:hash", get(|node: State<Arc<Node<_>>>, Path(id)| async move {
+        let data_router = Router::new().route(
+            "/:hash",
+            get(|node: State<Arc<Node<_>>>, Path(id)| async move {
                 node.fetch_data(id).await.map(Json)
-            }));
+            }),
+        );
 
         let router = Router::new()
             .nest("/peer", peer_router)
@@ -68,21 +82,33 @@ impl Backend for Http {
 
 #[async_trait::async_trait]
 impl Sender<msg::Greet<Self>> for Http {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Greet<Self>) -> Result<msg::GreetResp<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Greet<Self>,
+    ) -> Result<msg::GreetResp<Self>, Self::Error> {
         self.send_inner("/peer/greet", addr, msg).await
     }
 }
 
 #[async_trait::async_trait]
 impl Sender<msg::Ping<Self>> for Http {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Ping<Self>) -> Result<msg::Pong<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Ping<Self>,
+    ) -> Result<msg::Pong<Self>, Self::Error> {
         self.send_inner("/peer/ping", addr, msg).await
     }
 }
 
 #[async_trait::async_trait]
 impl Sender<msg::Discover<Self>> for Http {
-    async fn send(&self, addr: &Self::Addr, msg: msg::Discover<Self>) -> Result<msg::DiscoverResp<Self>, Self::Error> {
+    async fn send(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Discover<Self>,
+    ) -> Result<msg::DiscoverResp<Self>, Self::Error> {
         self.send_inner("/peer/discover", addr, msg).await
     }
 }
@@ -93,12 +119,11 @@ impl Http {
         path: &str,
         addr: &str,
         msg: M,
-    ) -> Result<M::Resp, Error> where M::Resp: DeserializeOwned {
-        let url = addr
-            .parse::<Url>()
-            .unwrap()
-            .join(path)
-            .unwrap();
+    ) -> Result<M::Resp, Error>
+    where
+        M::Resp: DeserializeOwned,
+    {
+        let url = addr.parse::<Url>().unwrap().join(path).unwrap();
         self.client
             .get(url)
             .json(&msg)

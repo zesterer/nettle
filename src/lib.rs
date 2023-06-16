@@ -1,32 +1,66 @@
 #![feature(trait_alias, let_chains)]
+#![deny(warnings)]
 
 mod backend;
-mod msg;
 mod identity;
+mod msg;
 
 pub use crate::{
     backend::{http, mem},
-    identity::{PublicId, PrivateId},
+    identity::{PrivateId, PublicId},
 };
 
 use crate::backend::{Backend, BackendFull, Sender};
 
-use slotmap::SlotMap;
-use tokio::select;
 use rand::prelude::*;
-use serde::{Serialize, Deserialize};
+use rsa::{traits::PublicKeyParts, RsaPublicKey};
+use serde::{Deserialize, Serialize};
+use slotmap::SlotMap;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
-    collections::HashMap,
 };
+use tokio::select;
 
 const MAX_LEVEL_PEERS: usize = 1;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ResourceId([u8; 32]);
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Tag([u8; 32]);
 
-impl ResourceId {
+impl std::ops::Deref for Tag {
+    type Target = [u8; 32];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Tag {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn digest_many<B: AsRef<[u8]>, I: IntoIterator<Item = B>>(bytes: I) -> Self {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        for bytes in bytes {
+            hasher.update(bytes);
+        }
+        Self(hasher.finalize().into())
+    }
+
+    pub fn fingerprint(key: &RsaPublicKey) -> Self {
+        Self::digest_many([key.n(), key.e()].map(|x| x.to_bytes_le()))
+    }
+
+    pub fn digest<B: AsRef<[u8]>>(bytes: B) -> Self {
+        Self::digest_many([bytes])
+    }
+
+    pub fn generate() -> Self {
+        Self(thread_rng().gen())
+    }
+
     pub fn dist_to(&self, other: Self) -> Self {
         let mut dist = self.0;
         for i in 0..dist.len() {
@@ -37,11 +71,15 @@ impl ResourceId {
 
     // log2, effectively
     pub fn level(&self) -> u16 {
-        self.0.into_iter().enumerate()
-            .find_map(|(i, b)| if b != 0 {
-                Some(255 - i as u16 * 8 - b.ilog2() as u16)
-            } else {
-                None
+        self.0
+            .into_iter()
+            .enumerate()
+            .find_map(|(i, b)| {
+                if b != 0 {
+                    Some(255 - i as u16 * 8 - b.ilog2() as u16)
+                } else {
+                    None
+                }
             })
             .unwrap_or(0)
     }
@@ -99,8 +137,8 @@ impl<B: BackendFull> Node<B> {
         Ok(this)
     }
 
-    pub fn id(&self) -> PublicId {
-        self.self_id.to_public()
+    pub fn id(&self) -> &PublicId {
+        &self.self_id.pub_id
     }
 
     pub fn addr(&self) -> &B::Addr {
@@ -116,13 +154,13 @@ impl<B: BackendFull> Node<B> {
     }
 
     pub async fn accept_peer(&self, id: PublicId, addr: B::Addr) {
-        if id != self.self_id.to_public()
+        if id != self.self_id.pub_id
             && !self.with_state(|state| state.peers_by_id.contains_key(&id))
             && let Ok(_) = self.backend
                 .send(&addr, msg::Ping { phantom: Default::default() })
                 .await
         {
-            let level = self.self_id.to_public().resource_id().dist_to(id.resource_id()).level();
+            let level = self.self_id.pub_id.tag.dist_to(id.tag).level();
             self.with_state(|state| {
                 state.peers_by_id
                     .entry(id.clone())
@@ -138,7 +176,7 @@ impl<B: BackendFull> Node<B> {
     async fn remove_peer(&self, peer_idx: PeerIdx) {
         self.with_state(|state| {
             if let Some(peer) = state.peers.remove(peer_idx) {
-                let level = self.self_id.to_public().resource_id().dist_to(peer.id.resource_id()).level();
+                let level = self.self_id.pub_id.tag.dist_to(peer.id.tag).level();
                 state.peers_by_id.remove(&peer.id);
                 state.peers_by_level[level as usize].retain(|idx| idx != &peer_idx);
             }
@@ -146,37 +184,51 @@ impl<B: BackendFull> Node<B> {
     }
 
     pub fn can_accept_peer(&self, id: &PublicId) -> bool {
-        id != &self.self_id.to_public() && self.with_state(|state| {
-            let level = self.self_id.to_public().resource_id().dist_to(id.resource_id()).level();
-            state.peers_by_level[level as usize].len() < MAX_LEVEL_PEERS && !state.peers_by_id.contains_key(id)
-        })
+        id != &self.self_id.pub_id
+            && self.with_state(|state| {
+                let level = self.self_id.pub_id.tag.dist_to(id.tag).level();
+                state.peers_by_level[level as usize].len() < MAX_LEVEL_PEERS
+                    && !state.peers_by_id.contains_key(id)
+            })
     }
 
-    pub async fn discover_peer(&self, supposed_id: Option<&PublicId>, addr: B::Addr) -> Result<(), Option<B::Addr>> {
+    pub async fn discover_peer(
+        &self,
+        supposed_id: Option<&PublicId>,
+        addr: B::Addr,
+    ) -> Result<(), Option<B::Addr>> {
         if supposed_id.map_or(true, |sid| self.can_accept_peer(&sid)) {
-            match self.backend
-                .send(&addr, msg::Greet { sender: (self.self_id.to_public(), self.self_addr.clone()) })
+            match self
+                .backend
+                .send(
+                    &addr,
+                    msg::Greet {
+                        sender: (self.self_id.pub_id.clone(), self.self_addr.clone()),
+                    },
+                )
                 .await
             {
-                Ok(resp) => match resp.result {
-                    Ok(id) if supposed_id.map_or(true, |sid| sid == &id) => {
-                        eprintln!("{:?} discovered accepting peer {:?}!", self.self_id, id);
-                        self.accept_peer(id, addr).await;
-                        Ok(())
-                    },
-                    Ok(id) => {
-                        eprintln!("{:?} peer got a different ID ({:?}) to the ID it was reported ({:?})!", self.self_id, id, supposed_id);
-                        Err(None)
-                    },
-                    Err(alt) => {
-                        // eprintln!("{:?} was rejected by peer {:?}.", self.self_id, supposed_id);
-                        Err(alt)
-                    },
-                },
+                Ok(resp) => {
+                    match resp.result {
+                        Ok(id) if supposed_id.map_or(true, |sid| sid == &id) => {
+                            eprintln!("{:?} discovered accepting peer {:?}!", self.self_id, id);
+                            self.accept_peer(id, addr).await;
+                            Ok(())
+                        }
+                        Ok(id) => {
+                            eprintln!("{:?} peer got a different ID ({:?}) to the ID it was reported ({:?})!", self.self_id, id, supposed_id);
+                            Err(None)
+                        }
+                        Err(alt) => {
+                            // eprintln!("{:?} was rejected by peer {:?}.", self.self_id, supposed_id);
+                            Err(alt)
+                        }
+                    }
+                }
                 Err(err) => {
                     eprintln!("Failed to sent greeting to initial peer: {:?}", err);
                     Err(None)
-                },
+                }
             }
         } else {
             Err(None)
@@ -188,43 +240,56 @@ impl<B: BackendFull> Node<B> {
         if self.can_accept_peer(&greet.sender.0) {
             eprintln!("{:?} accepted peer {:?}!", self.self_id, greet.sender.0);
             self.accept_peer(greet.sender.0, greet.sender.1).await;
-            msg::GreetResp { result: Ok(self.id()), phantom: Default::default() }
+            msg::GreetResp {
+                result: Ok(self.id().clone()),
+                phantom: Default::default(),
+            }
         } else {
             msg::GreetResp {
                 // Choose one of our existing peers to have the greeter talk to instead
                 // ("I don't want to be friends with you, go ask that other person")
-                result: Err(self.with_state(|state| state.peers
-                    .values()
-                    .choose(&mut thread_rng())
-                    .map(|peer| peer.addr.clone()))),
+                result: Err(self.with_state(|state| {
+                    state
+                        .peers
+                        .values()
+                        .choose(&mut thread_rng())
+                        .map(|peer| peer.addr.clone())
+                })),
                 phantom: Default::default(),
             }
         }
     }
 
-    pub async fn recv_ping(&self, ping: msg::Ping<B>) -> msg::Pong<B> {
-        msg::Pong { phantom: Default::default() }
+    pub async fn recv_ping(&self, _ping: msg::Ping<B>) -> msg::Pong<B> {
+        msg::Pong {
+            phantom: Default::default(),
+        }
     }
 
     pub async fn recv_discover(&self, discover: msg::Discover<B>) -> msg::DiscoverResp<B> {
         msg::DiscoverResp {
             // Determine whether we have a peer within at given distance
-            peer: self.with_state(|state| state.peers
-                .values()
-                // Don't tell the peer about itself
-                .filter(|peer| peer.id != discover.target)
-                // Only consider peers that are closer than the target
-                .filter(|peer| peer.id.resource_id().dist_to(discover.target.resource_id()).level() <= discover.max_level)
-                // .choose(&mut thread_rng())
-                // // Try to find that which has the greatest distance within the maximum distance
-                .min_by_key(|peer| peer.id.resource_id().dist_to(discover.target.resource_id()).0)
-                // // Only pass that peer on about a third of the time
-                // .filter(|_| thread_rng().gen_bool(0.3))
-                .map(|peer| (peer.id.clone(), peer.addr.clone()))),
+            peer: self.with_state(|state| {
+                state
+                    .peers
+                    .values()
+                    // Don't tell the peer about itself
+                    .filter(|peer| peer.id != discover.target)
+                    // Only consider peers that are closer than the target
+                    .filter(|peer| {
+                        peer.id.tag.dist_to(discover.target.tag).level() <= discover.max_level
+                    })
+                    // .choose(&mut thread_rng())
+                    // // Try to find that which has the greatest distance within the maximum distance
+                    .min_by_key(|peer| peer.id.tag.dist_to(discover.target.tag).0)
+                    // // Only pass that peer on about a third of the time
+                    // .filter(|_| thread_rng().gen_bool(0.3))
+                    .map(|peer| (peer.id.clone(), peer.addr.clone()))
+            }),
         }
     }
 
-    pub async fn fetch_data(&self, id: ResourceId) -> Result<Vec<u8>, ()> {
+    pub async fn fetch_data(&self, id: Tag) -> Result<Vec<u8>, ()> {
         todo!("Fetch data with ID {:?}", id)
     }
 
@@ -239,12 +304,16 @@ impl<B: BackendFull> Node<B> {
                 match self.discover_peer(None, peer_addr.clone()).await {
                     Ok(()) => break,
                     Err(None) => {
-                        eprintln!("{:?} failed to peer with initial peer {:?}!", self.id(), peer_addr);
-                    },
+                        eprintln!(
+                            "{:?} failed to peer with initial peer {:?}!",
+                            self.id(),
+                            peer_addr
+                        );
+                    }
                     Err(Some(alt_addr)) => {
                         eprintln!("{:?} attempted to connect to initial peer, but was rejected. Peer suggested {:?} instead.", self.id(), alt_addr);
                         peer_addr = alt_addr;
-                    },
+                    }
                 }
             }
         }
@@ -282,7 +351,7 @@ impl<B: BackendFull> Node<B> {
                         for current_level in (0..256).rev() {
                             match self.backend
                                 .send(&current_peer.1, msg::Discover {
-                                    target: self.id(),
+                                    target: self.id().clone(),
                                     max_level: current_level,
                                     phantom: Default::default(),
                                 })
@@ -307,7 +376,7 @@ impl<B: BackendFull> Node<B> {
                         .map(|peer| (peer.id.clone(), peer.addr.clone())))
                     {
                         // Don't ask a peer for an unreasonable target distance that it's exceedingly unlikely to attain
-                        let max_ask_level = peer_id.resource_id().dist_to(self.id().resource_id()).level().saturating_sub(2);
+                        let max_ask_level = peer_id.tag.dist_to(self.id().tag).level().saturating_sub(2);
                         match self.backend
                             .send(&peer_addr, msg::Discover {
                                 target: self.id(),
