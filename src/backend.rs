@@ -1,12 +1,9 @@
 pub mod http;
 pub mod mem;
 
-use crate::{
-    msg::{self, Msg},
-    Node,
-};
+use crate::{msg, Node, PublicId, Tag};
 
-use std::{fmt, hash::Hash, sync::Arc};
+use std::{fmt, hash::Hash, sync::Arc, time::Duration};
 
 #[async_trait::async_trait]
 pub trait Backend: Sized + Sync + 'static {
@@ -17,17 +14,32 @@ pub trait Backend: Sized + Sync + 'static {
     async fn create(config: Self::Config) -> Result<Self, Self::Error>;
     async fn init(&self, _node: &Arc<Node<Self>>) {}
     async fn host(node: Arc<Node<Self>>) -> Result<(), Self::Error>;
-}
 
-pub trait BackendFull = Backend
-    + Sender<msg::Greet<Self>>
-    + Sender<msg::Ping<Self>>
-    + Sender<msg::Discover<Self>>
-    + Sender<msg::Locate<Self>>
-    + Sender<msg::Upload<Self>>
-    + Sender<msg::Download<Self>>;
-
-#[async_trait::async_trait]
-pub trait Sender<M: Msg<Self>>: Backend {
-    async fn send(&self, addr: &Self::Addr, msg: M) -> Result<M::Resp, Self::Error>;
+    async fn send_greet(
+        &self,
+        addr: &Self::Addr,
+        sender: (PublicId, Self::Addr),
+    ) -> Result<Result<PublicId, Option<Self::Addr>>, Self::Error>;
+    async fn send_ping(&self, addr: &Self::Addr) -> Result<Duration, Self::Error>;
+    async fn send_discover(
+        &self,
+        addr: &Self::Addr,
+        target: Tag,
+        max_level: u16,
+    ) -> Result<Option<(PublicId, Self::Addr)>, Self::Error>;
+    async fn send_locate(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Locate<Self>,
+    ) -> Result<msg::LocateResp<Self>, Self::Error>;
+    async fn send_upload(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Upload<Self>,
+    ) -> Result<msg::UploadResp<Self>, Self::Error>;
+    async fn send_download(
+        &self,
+        addr: &Self::Addr,
+        msg: msg::Download<Self>,
+    ) -> Result<msg::DownloadResp<Self>, Self::Error>;
 }

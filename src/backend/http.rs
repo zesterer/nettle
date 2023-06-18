@@ -1,7 +1,4 @@
-use crate::{
-    msg::{self, Msg},
-    Backend, Node, Sender, Tag,
-};
+use crate::{msg, Backend, Node, PublicId, Tag};
 
 use axum::{
     body::Bytes,
@@ -10,8 +7,12 @@ use axum::{
     Json, Server,
 };
 use reqwest::Url;
-use serde::{de::DeserializeOwned, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -45,21 +46,28 @@ impl Backend for Http {
         let peer_router = Router::new()
             .route(
                 "/greet",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_greet(msg).await)
+                get(|node: State<Arc<Node<_>>>, msg: Json<Greet>| async move {
+                    Json(GreetResp {
+                        result: node.recv_greet(msg.0.sender).await,
+                    })
                 }),
             )
             .route(
                 "/ping",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_ping(msg).await)
+                get(|node: State<Arc<Node<_>>>, _: Json<Ping>| async move {
+                    node.recv_ping().await;
+                    Json(Pong)
                 }),
             )
             .route(
                 "/discover",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_discover(msg).await)
-                }),
+                get(
+                    |node: State<Arc<Node<_>>>, msg: Json<Discover>| async move {
+                        Json(DiscoverResp {
+                            peer: node.recv_discover(msg.target, msg.max_level).await,
+                        })
+                    },
+                ),
             )
             .route(
                 "/locate",
@@ -121,66 +129,53 @@ impl Backend for Http {
             .await
             .map_err(Error::Hyper)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Greet<Self>> for Http {
-    async fn send(
+    async fn send_greet(
         &self,
         addr: &Self::Addr,
-        msg: msg::Greet<Self>,
-    ) -> Result<msg::GreetResp<Self>, Self::Error> {
-        self.send_inner("/peer/greet", addr, msg).await
+        sender: (PublicId, Self::Addr),
+    ) -> Result<Result<PublicId, Option<Self::Addr>>, Self::Error> {
+        Ok(self
+            .send_inner("/peer/greet", addr, Greet { sender })
+            .await?
+            .result)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Ping<Self>> for Http {
-    async fn send(
+    async fn send_ping(&self, addr: &Self::Addr) -> Result<Duration, Self::Error> {
+        let now = Instant::now();
+        self.send_inner("/peer/ping", addr, Ping).await?;
+        Ok(now.elapsed())
+    }
+
+    async fn send_discover(
         &self,
         addr: &Self::Addr,
-        msg: msg::Ping<Self>,
-    ) -> Result<msg::Pong<Self>, Self::Error> {
-        self.send_inner("/peer/ping", addr, msg).await
+        target: Tag,
+        max_level: u16,
+    ) -> Result<Option<(PublicId, Self::Addr)>, Self::Error> {
+        Ok(self
+            .send_inner("/peer/discover", addr, Discover { target, max_level })
+            .await?
+            .peer)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Discover<Self>> for Http {
-    async fn send(
-        &self,
-        addr: &Self::Addr,
-        msg: msg::Discover<Self>,
-    ) -> Result<msg::DiscoverResp<Self>, Self::Error> {
-        self.send_inner("/peer/discover", addr, msg).await
-    }
-}
-
-#[async_trait::async_trait]
-impl Sender<msg::Locate<Self>> for Http {
-    async fn send(
+    async fn send_locate(
         &self,
         addr: &Self::Addr,
         msg: msg::Locate<Self>,
     ) -> Result<msg::LocateResp<Self>, Self::Error> {
         self.send_inner("/peer/locate", addr, msg).await
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Upload<Self>> for Http {
-    async fn send(
+    async fn send_upload(
         &self,
         addr: &Self::Addr,
         msg: msg::Upload<Self>,
     ) -> Result<msg::UploadResp<Self>, Self::Error> {
         self.send_inner("/peer/upload", addr, msg).await
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Download<Self>> for Http {
-    async fn send(
+    async fn send_download(
         &self,
         addr: &Self::Addr,
         msg: msg::Download<Self>,
@@ -190,15 +185,12 @@ impl Sender<msg::Download<Self>> for Http {
 }
 
 impl Http {
-    async fn send_inner<M: Msg<Http> + Serialize>(
+    async fn send_inner<M: Msg + Serialize>(
         &self,
         path: &str,
         addr: &str,
         msg: M,
-    ) -> Result<M::Resp, Error>
-    where
-        M::Resp: DeserializeOwned,
-    {
+    ) -> Result<M::Resp, Error> {
         let url = addr.parse::<Url>().unwrap().join(path).unwrap();
         self.client
             .get(url)
@@ -211,4 +203,63 @@ impl Http {
             .await
             .map_err(Error::Reqwest)
     }
+}
+
+pub trait Msg {
+    type Resp: DeserializeOwned;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Greet {
+    pub sender: (PublicId, String),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GreetResp {
+    pub result: Result<PublicId, Option<String>>,
+}
+
+impl Msg for Greet {
+    type Resp = GreetResp;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Ping;
+
+#[derive(Serialize, Deserialize)]
+pub struct Pong;
+
+impl Msg for Ping {
+    type Resp = Pong;
+}
+
+/// Attempt to discover a new peer by asking existing peers.
+///
+/// `addr` specifies the original requesting peer.
+/// `max_level` specifies the maximum distance (log2) that the returned peer should be from the given address
+#[derive(Serialize, Deserialize)]
+pub struct Discover {
+    pub target: Tag,
+    pub max_level: u16,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DiscoverResp {
+    pub peer: Option<(PublicId, String)>,
+}
+
+impl Msg for Discover {
+    type Resp = DiscoverResp;
+}
+
+impl Msg for msg::Locate<Http> {
+    type Resp = msg::LocateResp<Http>;
+}
+
+impl Msg for msg::Upload<Http> {
+    type Resp = msg::UploadResp<Http>;
+}
+
+impl Msg for msg::Download<Http> {
+    type Resp = msg::DownloadResp<Http>;
 }

@@ -1,5 +1,5 @@
-use crate::{msg, Backend, Node, Sender};
-use std::{cmp, fmt, hash, sync::Arc, sync::OnceLock};
+use crate::{msg, Backend, Node, PublicId, Tag};
+use std::{cmp, fmt, hash, sync::Arc, sync::OnceLock, time::Duration};
 
 #[derive(Clone, Default)]
 pub struct Addr(pub Arc<OnceLock<Arc<Node<Mem>>>>);
@@ -44,66 +44,46 @@ impl Backend for Mem {
         let () = futures::future::pending().await;
         Ok(())
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Greet<Self>> for Mem {
-    async fn send(
+    async fn send_greet(
         &self,
         addr: &Self::Addr,
-        msg: msg::Greet<Self>,
-    ) -> Result<msg::GreetResp<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_greet(msg).await)
+        sender: (PublicId, Self::Addr),
+    ) -> Result<Result<PublicId, Option<Self::Addr>>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_greet(sender).await)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Ping<Self>> for Mem {
-    async fn send(
+    async fn send_ping(&self, addr: &Self::Addr) -> Result<Duration, Self::Error> {
+        addr.0.get().unwrap().recv_ping().await;
+        Ok(Duration::ZERO)
+    }
+
+    async fn send_discover(
         &self,
         addr: &Self::Addr,
-        msg: msg::Ping<Self>,
-    ) -> Result<msg::Pong<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_ping(msg).await)
+        target: Tag,
+        max_level: u16,
+    ) -> Result<Option<(PublicId, Self::Addr)>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_discover(target, max_level).await)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Discover<Self>> for Mem {
-    async fn send(
-        &self,
-        addr: &Self::Addr,
-        msg: msg::Discover<Self>,
-    ) -> Result<msg::DiscoverResp<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_discover(msg).await)
-    }
-}
-
-#[async_trait::async_trait]
-impl Sender<msg::Locate<Self>> for Mem {
-    async fn send(
+    async fn send_locate(
         &self,
         addr: &Self::Addr,
         msg: msg::Locate<Self>,
     ) -> Result<msg::LocateResp<Self>, Self::Error> {
         Ok(addr.0.get().unwrap().recv_locate(msg).await)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Upload<Self>> for Mem {
-    async fn send(
+    async fn send_upload(
         &self,
         addr: &Self::Addr,
         msg: msg::Upload<Self>,
     ) -> Result<msg::UploadResp<Self>, Self::Error> {
         Ok(addr.0.get().unwrap().recv_upload(msg).await)
     }
-}
 
-#[async_trait::async_trait]
-impl Sender<msg::Download<Self>> for Mem {
-    async fn send(
+    async fn send_download(
         &self,
         addr: &Self::Addr,
         msg: msg::Download<Self>,
