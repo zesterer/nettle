@@ -105,7 +105,7 @@ impl Backend for Http {
                         Ok(tag) => match node.do_download(tag).await {
                             Ok(Some(data)) => (StatusCode::OK, Ok(Bytes::from(data))),
                             Ok(None) => (StatusCode::NOT_FOUND, Err("data does not exist")),
-                            Err(()) => (StatusCode::BAD_GATEWAY, Err("unresponsive peer")),
+                            Err(err) => (StatusCode::BAD_GATEWAY, Err(err)),
                         },
                         Err(err) => (StatusCode::BAD_REQUEST, Err(err)),
                     }
@@ -116,7 +116,7 @@ impl Backend for Http {
                 get(|node: State<Arc<Node<_>>>, bytes: Bytes| async move {
                     match node.do_upload(bytes.to_vec().into_boxed_slice()).await {
                         Ok(tag) => (StatusCode::CREATED, tag.to_string()),
-                        Err(()) => (StatusCode::BAD_GATEWAY, "unresponsive peer".into()),
+                        Err(err) => (StatusCode::BAD_GATEWAY, err.into()),
                     }
                 }),
             );

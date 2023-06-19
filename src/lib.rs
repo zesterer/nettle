@@ -1,4 +1,3 @@
-#![feature(trait_alias, let_chains)]
 #![deny(warnings)]
 
 mod backend;
@@ -98,20 +97,24 @@ impl<B: Backend> Node<B> {
     pub async fn accept_peer(&self, id: PublicId, addr: B::Addr) -> bool {
         if id != self.self_id.pub_id
             && !self.with_state(|state| state.peers_by_id.contains_key(&id))
-            && let Ok(ping) = self.backend.send_ping(&addr).await
         {
-            let level = self.self_id.pub_id.tag.dist_to(id.tag).level();
-            self.with_state(|state| {
-                state.peers_by_id
-                    .entry(id.clone())
-                    .and_modify(|idx| state.peers[*idx].ping = ping)
-                    .or_insert_with(|| {
-                        let idx = state.peers.insert(Peer { id, addr, ping });
-                        state.peers_by_level[level as usize].push(idx);
-                        idx
-                    });
-            });
-            true
+            if let Ok(ping) = self.backend.send_ping(&addr).await {
+                let level = self.self_id.pub_id.tag.dist_to(id.tag).level();
+                self.with_state(|state| {
+                    state
+                        .peers_by_id
+                        .entry(id.clone())
+                        .and_modify(|idx| state.peers[*idx].ping = ping)
+                        .or_insert_with(|| {
+                            let idx = state.peers.insert(Peer { id, addr, ping });
+                            state.peers_by_level[level as usize].push(idx);
+                            idx
+                        });
+                });
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -247,7 +250,7 @@ impl<B: Backend> Node<B> {
         Ok(())
     }
 
-    pub async fn locate_data(&self, tag: Tag) -> Result<(bool, (PublicId, B::Addr)), ()> {
+    pub async fn locate_data(&self, tag: Tag) -> Result<(bool, (PublicId, B::Addr)), &'static str> {
         if self.has_data(tag).await {
             Ok((true, (self.id().clone(), self.self_addr.clone())))
         } else if let Some(mut closest) = self.with_state(|state| {
@@ -270,19 +273,11 @@ impl<B: Backend> Node<B> {
                         } else {
                             // We found a liar! Peer returned a node that was further. Assume this means that it can't
                             // locate it.
-                            eprintln!("{:?} lied to peer {:?} and returned a node that was *further* from the target!", closest.0, self.id());
+                            eprintln!("{:?} lied to {:?} and returned a node that was *further* from the target!", closest.0, self.id());
                             break Ok((false, (self.id().clone(), self.self_addr.clone())));
                         }
                     }
-                    Err(err) => {
-                        eprintln!(
-                            "{:?} failed to send locate to peer {:?}: {:?}",
-                            self.id(),
-                            closest.0,
-                            err
-                        );
-                        break Err(());
-                    }
+                    Err(_err) => break Err("peer did not respond"),
                 }
             }
         } else {
@@ -310,42 +305,34 @@ impl<B: Backend> Node<B> {
         }
     }
 
-    pub async fn do_upload(&self, data: Box<[u8]>) -> Result<Tag, ()> {
+    pub async fn do_upload(&self, data: Box<[u8]>) -> Result<Tag, &'static str> {
         let tag = Tag::digest(&*data);
         match self.locate_data(tag).await {
-            Ok((false, closest)) => match self.backend.send_upload(&closest.1, data).await {
-                Ok(resp) => resp.map(|()| tag),
-                Err(err) => {
-                    eprintln!(
-                        "{:?} failed to send upload to peer {:?}: {:?}",
-                        self.id(),
-                        closest.0,
-                        err
-                    );
-                    Err(())
-                }
-            },
             Ok((true, _)) => Ok(tag), // Already uploaded
-            Err(()) => {
+            // We're the closest node
+            Ok((false, closest)) if closest.0.tag == self.id().tag => {
                 self.save_data(tag, data).await;
                 Ok(tag)
             }
+            // The closest node is another node
+            Ok((false, closest)) => match self.backend.send_upload(&closest.1, data).await {
+                Ok(resp) => resp.map(|()| tag).map_err(|()| "peer did not respond"),
+                Err(_err) => Err("peer did not respond"),
+            },
+            Err(err) => Err(err),
         }
     }
 
-    pub async fn do_download(&self, tag: Tag) -> Result<Option<Box<[u8]>>, ()> {
+    pub async fn do_download(&self, tag: Tag) -> Result<Option<Box<[u8]>>, &'static str> {
         match self.locate_data(tag).await? {
             (true, closest) => match self.backend.send_download(&closest.1, tag).await {
-                Ok(data) => Ok(data), // TODO: What if it's None? That's wrong...
-                Err(err) => {
-                    eprintln!(
-                        "{:?} failed to send download to peer {:?}: {:?}",
-                        self.id(),
-                        closest.0,
-                        err
-                    );
-                    Err(())
+                Ok(Some(data)) if Tag::digest(&*data) == tag => Ok(Some(data)),
+                Ok(Some(_)) => {
+                    eprintln!("data integrity check from {:?} failed", closest.0);
+                    Err("integrity check failed")
                 }
+                Ok(None) => Err("peer reported data but did not provide any"),
+                Err(_err) => Err("peer did not respond"),
             },
             (false, _) => Ok(None),
         }
