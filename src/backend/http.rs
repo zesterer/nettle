@@ -1,4 +1,4 @@
-use crate::{msg, Backend, Node, PublicId, Tag};
+use crate::{Backend, Node, PublicId, Tag};
 
 use axum::{
     body::Bytes,
@@ -71,21 +71,29 @@ impl Backend for Http {
             )
             .route(
                 "/locate",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_locate(msg).await)
+                get(|node: State<Arc<Node<_>>>, msg: Json<Locate>| async move {
+                    Json(LocateResp {
+                        result: node.recv_locate(msg.tag).await,
+                    })
                 }),
             )
             .route(
                 "/upload",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_upload(msg).await)
+                get(|node: State<Arc<Node<_>>>, msg: Json<Upload>| async move {
+                    Json(UploadResp {
+                        result: node.recv_upload(msg.0.data).await,
+                    })
                 }),
             )
             .route(
                 "/download",
-                get(|node: State<Arc<Node<_>>>, Json(msg)| async move {
-                    Json(node.recv_download(msg).await)
-                }),
+                get(
+                    |node: State<Arc<Node<_>>>, msg: Json<Download>| async move {
+                        Json(DownloadResp {
+                            data: node.recv_download(msg.tag).await,
+                        })
+                    },
+                ),
             );
 
         let data_router = Router::new()
@@ -93,7 +101,7 @@ impl Backend for Http {
                 "/:hash",
                 get(|node: State<Arc<Node<_>>>, Path(id)| async move {
                     match Tag::try_from_hex::<String>(id) {
-                        Ok(tag) => match node.fetch_data(tag).await {
+                        Ok(tag) => match node.do_download(tag).await {
                             Ok(Some(data)) => Ok(Bytes::from(data)),
                             Ok(None) => Err("data does not exist"),
                             Err(()) => Err("unknown error"),
@@ -105,15 +113,7 @@ impl Backend for Http {
             .route(
                 "/upload",
                 get(|node: State<Arc<Node<_>>>, bytes: Bytes| async move {
-                    Json(
-                        node.recv_upload(msg::Upload {
-                            data: bytes.to_vec().into_boxed_slice(),
-                            phantom: Default::default(),
-                        })
-                        .await
-                        .result
-                        .ok(),
-                    )
+                    Json(node.do_upload(bytes.to_vec().into_boxed_slice()).await.ok())
                 }),
             );
 
@@ -162,25 +162,34 @@ impl Backend for Http {
     async fn send_locate(
         &self,
         addr: &Self::Addr,
-        msg: msg::Locate<Self>,
-    ) -> Result<msg::LocateResp<Self>, Self::Error> {
-        self.send_inner("/peer/locate", addr, msg).await
+        tag: Tag,
+    ) -> Result<Result<bool, (PublicId, Self::Addr)>, Self::Error> {
+        Ok(self
+            .send_inner("/peer/locate", addr, Locate { tag })
+            .await?
+            .result)
     }
 
     async fn send_upload(
         &self,
         addr: &Self::Addr,
-        msg: msg::Upload<Self>,
-    ) -> Result<msg::UploadResp<Self>, Self::Error> {
-        self.send_inner("/peer/upload", addr, msg).await
+        data: Box<[u8]>,
+    ) -> Result<Result<(), ()>, Self::Error> {
+        Ok(self
+            .send_inner("/peer/upload", addr, Upload { data })
+            .await?
+            .result)
     }
 
     async fn send_download(
         &self,
         addr: &Self::Addr,
-        msg: msg::Download<Self>,
-    ) -> Result<msg::DownloadResp<Self>, Self::Error> {
-        self.send_inner("/peer/download", addr, msg).await
+        tag: Tag,
+    ) -> Result<Option<Box<[u8]>>, Self::Error> {
+        Ok(self
+            .send_inner("/peer/download", addr, Download { tag })
+            .await?
+            .data)
     }
 }
 
@@ -210,13 +219,13 @@ pub trait Msg {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Greet {
-    pub sender: (PublicId, String),
+struct Greet {
+    sender: (PublicId, String),
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GreetResp {
-    pub result: Result<PublicId, Option<String>>,
+struct GreetResp {
+    result: Result<PublicId, Option<String>>,
 }
 
 impl Msg for Greet {
@@ -224,10 +233,10 @@ impl Msg for Greet {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Ping;
+struct Ping;
 
 #[derive(Serialize, Deserialize)]
-pub struct Pong;
+struct Pong;
 
 impl Msg for Ping {
     type Resp = Pong;
@@ -238,28 +247,64 @@ impl Msg for Ping {
 /// `addr` specifies the original requesting peer.
 /// `max_level` specifies the maximum distance (log2) that the returned peer should be from the given address
 #[derive(Serialize, Deserialize)]
-pub struct Discover {
-    pub target: Tag,
-    pub max_level: u16,
+struct Discover {
+    target: Tag,
+    max_level: u16,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct DiscoverResp {
-    pub peer: Option<(PublicId, String)>,
+struct DiscoverResp {
+    peer: Option<(PublicId, String)>,
 }
 
 impl Msg for Discover {
     type Resp = DiscoverResp;
 }
 
-impl Msg for msg::Locate<Http> {
-    type Resp = msg::LocateResp<Http>;
+/// Attempt to discover a tag in the network.
+#[derive(Serialize, Deserialize)]
+struct Locate {
+    tag: Tag,
 }
 
-impl Msg for msg::Upload<Http> {
-    type Resp = msg::UploadResp<Http>;
+#[derive(Serialize, Deserialize)]
+struct LocateResp {
+    // Ok(true) => I own the resource
+    // Ok(false) => I do not own the resource and do not know anybody closer to the resource (404!)
+    // Err(_) => I do not own the resource but this other node is closer to it
+    pub result: Result<bool, (PublicId, String)>,
 }
 
-impl Msg for msg::Download<Http> {
-    type Resp = msg::DownloadResp<Http>;
+impl Msg for Locate {
+    type Resp = LocateResp;
+}
+
+#[derive(Serialize, Deserialize)]
+struct Upload {
+    data: Box<[u8]>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadResp {
+    result: Result<(), ()>,
+}
+
+impl Msg for Upload {
+    type Resp = UploadResp;
+}
+
+#[derive(Serialize, Deserialize)]
+struct Download {
+    pub tag: Tag,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DownloadResp {
+    // Some(_) => I own the resource and here it is
+    // None => I do not own the resource
+    pub data: Option<Box<[u8]>>,
+}
+
+impl Msg for Download {
+    type Resp = DownloadResp;
 }

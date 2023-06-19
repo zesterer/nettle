@@ -1,4 +1,4 @@
-use crate::{msg, Backend, Node, PublicId, Tag};
+use crate::{Backend, Node, PublicId, Tag};
 use std::{cmp, fmt, hash, sync::Arc, sync::OnceLock, time::Duration};
 
 #[derive(Clone, Default)]
@@ -70,24 +70,24 @@ impl Backend for Mem {
     async fn send_locate(
         &self,
         addr: &Self::Addr,
-        msg: msg::Locate<Self>,
-    ) -> Result<msg::LocateResp<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_locate(msg).await)
+        tag: Tag,
+    ) -> Result<Result<bool, (PublicId, Self::Addr)>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_locate(tag).await)
     }
 
     async fn send_upload(
         &self,
         addr: &Self::Addr,
-        msg: msg::Upload<Self>,
-    ) -> Result<msg::UploadResp<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_upload(msg).await)
+        data: Box<[u8]>,
+    ) -> Result<Result<(), ()>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_upload(data).await)
     }
 
     async fn send_download(
         &self,
         addr: &Self::Addr,
-        msg: msg::Download<Self>,
-    ) -> Result<msg::DownloadResp<Self>, Self::Error> {
-        Ok(addr.0.get().unwrap().recv_download(msg).await)
+        tag: Tag,
+    ) -> Result<Option<Box<[u8]>>, Self::Error> {
+        Ok(addr.0.get().unwrap().recv_download(tag).await)
     }
 }

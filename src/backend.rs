@@ -1,7 +1,7 @@
 pub mod http;
 pub mod mem;
 
-use crate::{msg, Node, PublicId, Tag};
+use crate::{Node, PublicId, Tag};
 
 use std::{fmt, hash::Hash, sync::Arc, time::Duration};
 
@@ -30,16 +30,16 @@ pub trait Backend: Sized + Sync + 'static {
     async fn send_locate(
         &self,
         addr: &Self::Addr,
-        msg: msg::Locate<Self>,
-    ) -> Result<msg::LocateResp<Self>, Self::Error>;
+        tag: Tag,
+    ) -> Result<Result<bool, (PublicId, Self::Addr)>, Self::Error>;
     async fn send_upload(
         &self,
         addr: &Self::Addr,
-        msg: msg::Upload<Self>,
-    ) -> Result<msg::UploadResp<Self>, Self::Error>;
+        data: Box<[u8]>,
+    ) -> Result<Result<(), ()>, Self::Error>;
     async fn send_download(
         &self,
         addr: &Self::Addr,
-        msg: msg::Download<Self>,
-    ) -> Result<msg::DownloadResp<Self>, Self::Error>;
+        tag: Tag,
+    ) -> Result<Option<Box<[u8]>>, Self::Error>;
 }
