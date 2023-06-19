@@ -22,7 +22,7 @@ async fn main() -> Result<(), Error<http::Error>> {
         host_addr.parse().unwrap(),
         args.initial_peers,
         http::Config {
-            bind_addr: format!("[::1]:{}", args.port).parse().unwrap(),
+            bind_addr: format!("{}:{}", args.address, args.port).parse().unwrap(),
         },
     )
     .await?
