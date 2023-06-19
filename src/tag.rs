@@ -1,8 +1,9 @@
 use rand::prelude::*;
 use rsa::{traits::PublicKeyParts, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 #[serde(into = "String")]
 pub struct Tag([u8; 32]);
@@ -24,6 +25,18 @@ impl TryFrom<String> for Tag {
 impl Into<String> for Tag {
     fn into(self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl fmt::Debug for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        hex::encode(self.0).fmt(f)
+    }
+}
+
+impl fmt::Display for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        hex::encode(self.0).fmt(f)
     }
 }
 

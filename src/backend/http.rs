@@ -6,6 +6,7 @@ use axum::{
     routing::{get, Router},
     Json, Server,
 };
+use hyper::StatusCode;
 use reqwest::Url;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -102,18 +103,21 @@ impl Backend for Http {
                 get(|node: State<Arc<Node<_>>>, Path(id)| async move {
                     match Tag::try_from_hex::<String>(id) {
                         Ok(tag) => match node.do_download(tag).await {
-                            Ok(Some(data)) => Ok(Bytes::from(data)),
-                            Ok(None) => Err("data does not exist"),
-                            Err(()) => Err("unknown error"),
+                            Ok(Some(data)) => (StatusCode::OK, Ok(Bytes::from(data))),
+                            Ok(None) => (StatusCode::NOT_FOUND, Err("data does not exist")),
+                            Err(()) => (StatusCode::BAD_GATEWAY, Err("unresponsive peer")),
                         },
-                        Err(err) => Err(err),
+                        Err(err) => (StatusCode::BAD_REQUEST, Err(err)),
                     }
                 }),
             )
             .route(
                 "/upload",
                 get(|node: State<Arc<Node<_>>>, bytes: Bytes| async move {
-                    Json(node.do_upload(bytes.to_vec().into_boxed_slice()).await.ok())
+                    match node.do_upload(bytes.to_vec().into_boxed_slice()).await {
+                        Ok(tag) => (StatusCode::CREATED, tag.to_string()),
+                        Err(()) => (StatusCode::BAD_GATEWAY, "unresponsive peer".into()),
+                    }
                 }),
             );
 
