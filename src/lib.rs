@@ -113,6 +113,10 @@ impl<B: Backend> Node<B> {
                 });
                 true
             } else {
+                eprintln!(
+                    "Tried to accept peer {:?} but they did not respond to a ping",
+                    id
+                );
                 false
             }
         } else {
