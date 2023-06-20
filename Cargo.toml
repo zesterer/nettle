@@ -19,6 +19,7 @@ sha3 = "0.10"
 rand_chacha = "0.3"
 hex = "0.4"
 clap = { version = "4.3", features = ["derive"] }
+public-ip-addr = "0.1"
 
 [dev-dependencies]
 dot = "0.1"
