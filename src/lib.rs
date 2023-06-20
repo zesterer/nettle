@@ -335,6 +335,7 @@ impl<B: Backend> Node<B> {
 
     pub async fn do_download(&self, tag: Tag) -> Result<Option<Box<[u8]>>, &'static str> {
         match self.locate_data(tag).await? {
+            (true, closest) if closest.0 == *self.id() => Ok(self.load_data(tag).await),
             (true, closest) => match self.backend.send_download(&closest.1, tag).await {
                 Ok(Some(data)) if Tag::digest(&*data) == tag => Ok(Some(data)),
                 Ok(Some(_)) => {
