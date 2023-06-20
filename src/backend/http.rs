@@ -126,6 +126,19 @@ impl Backend for Http {
         let router = Router::new()
             .nest("/peer", peer_router)
             .nest("/data", data_router)
+            .route(
+                "/list_peers",
+                get(|node: State<Arc<Node<_>>>| async move {
+                    let peers = node.with_state(|state| {
+                        state
+                            .peers
+                            .values()
+                            .map(|p| (format!("{:?}", p.id), format!("{}", p.addr)))
+                            .collect::<Vec<_>>()
+                    });
+                    (StatusCode::OK, Json(peers))
+                }),
+            )
             .with_state(node.clone());
 
         eprintln!("Starting HTTP server on {}", node.backend.config.bind_addr);
