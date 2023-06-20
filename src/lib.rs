@@ -174,11 +174,12 @@ impl<B: Backend> Node<B> {
                 }
                 Ok(Err(alt)) => Err(alt),
                 Err(err) => {
-                    eprintln!("Failed to sent greeting to initial peer: {:?}", err);
+                    eprintln!("Failed to sent greeting to initial peer: {}", err);
                     Err(None)
                 }
             }
         } else {
+            eprintln!("Can't accept peer {:?}", supposed_id);
             Err(None)
         }
     }
@@ -194,13 +195,18 @@ impl<B: Backend> Node<B> {
         } else {
             // Choose one of our existing peers to have the greeter talk to instead
             // ("I don't want to be friends with you, go ask that other person")
-            Err(self.with_state(|state| {
+            let alt = self.with_state(|state| {
                 state
                     .peers
                     .values()
                     .choose(&mut thread_rng())
                     .map(|peer| peer.addr.clone())
-            }))
+            });
+            eprintln!(
+                "Rejected greeting from {:?}, returned alternative peer {:?}",
+                sender.0, alt
+            );
+            Err(alt)
         }
     }
 

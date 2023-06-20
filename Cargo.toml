@@ -20,6 +20,7 @@ rand_chacha = "0.3"
 hex = "0.4"
 clap = { version = "4.3", features = ["derive"] }
 public-ip-addr = "0.1"
+thiserror = "1.0"
 
 [dev-dependencies]
 dot = "0.1"

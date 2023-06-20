@@ -3,13 +3,13 @@ pub mod mem;
 
 use crate::{Node, PublicId, Tag};
 
-use std::{fmt, hash::Hash, sync::Arc, time::Duration};
+use std::{error, fmt, hash::Hash, sync::Arc, time::Duration};
 
 #[async_trait::async_trait]
 pub trait Backend: Sized + Sync + 'static {
     type Addr: Clone + Hash + Eq + fmt::Debug;
     type Config;
-    type Error: fmt::Debug + Send + Sync;
+    type Error: error::Error + Send + Sync;
 
     async fn create(config: Self::Config) -> Result<Self, Self::Error>;
     async fn init(&self, _node: &Arc<Node<Self>>) {}

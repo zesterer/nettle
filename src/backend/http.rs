@@ -15,9 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("hyper: {0}")]
     Hyper(hyper::Error),
+    #[error("reqwest: {0}")]
     Reqwest(reqwest::Error),
 }
 
@@ -207,7 +209,6 @@ impl Http {
         let url = addr.parse::<Url>().unwrap().join(path).unwrap();
         self.client
             .get(url)
-            .timeout(std::time::Duration::from_secs(1))
             .json(&msg)
             .send()
             .await
